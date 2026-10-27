@@ -483,23 +483,18 @@ class _StateWatcher(StateChangeWatcher):
     def _everything(self) -> set[str]:
         """Return everything the include lists can pick from.
 
-        The primary entities in the registry, as a target through a device
-        or area would give, and the entities without a registry entry, which
-        only a domain can pick. Those are found when the registry changes,
-        not the moment their first state is written.
+        All entities in the registry, and the entities without a registry
+        entry, which only a domain can pick. Those are found when the registry
+        changes, not the moment their first state is written.
         """
         registry = er.async_get(self._hass)
-        primary = {
-            entity_id
-            for entity_id, entry in registry.entities.items()
-            if entry.entity_category is None
-        }
+        registered = set(registry.entities.keys())
         unregistered = {
             entity_id
             for entity_id in self._hass.states.async_entity_ids()
             if entity_id not in registry.entities
         }
-        return primary | unregistered
+        return registered | unregistered
 
     @callback
     def _handle_entities_update(self, tracked_entities: set[str]) -> None:
