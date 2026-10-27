@@ -52,9 +52,11 @@ CONF_BLIP_TOLERANCE = "blip_tolerance"
 CONF_CONFIG_ENTRY = "config_entry"
 CONF_DEVICE_CLASS = "device_class"
 CONF_DOMAIN = "domain"
+CONF_ENTITY_CATEGORY = "entity_category"
 CONF_EXCLUDE_CONFIG_ENTRY = "exclude_config_entry"
 CONF_EXCLUDE_DEVICE_CLASS = "exclude_device_class"
 CONF_EXCLUDE_DOMAIN = "exclude_domain"
+CONF_EXCLUDE_ENTITY_CATEGORY = "exclude_entity_category"
 CONF_EXCLUDE_INTEGRATION = "exclude_integration"
 CONF_EXCLUDE_TARGET = "exclude_target"
 CONF_FROM = "from"
@@ -136,11 +138,13 @@ _OPTIONS_SCHEMA = vol.All(
             vol.Optional(CONF_INTEGRATION): _VALUES,
             vol.Optional(CONF_CONFIG_ENTRY): _VALUES,
             vol.Optional(CONF_DEVICE_CLASS): _VALUES,
+            vol.Optional(CONF_ENTITY_CATEGORY): _VALUES,
             vol.Optional(CONF_EXCLUDE_TARGET): _EXCLUDE_TARGET_SCHEMA,
             vol.Optional(CONF_EXCLUDE_DOMAIN): _VALUES,
             vol.Optional(CONF_EXCLUDE_INTEGRATION): _VALUES,
             vol.Optional(CONF_EXCLUDE_CONFIG_ENTRY): _VALUES,
             vol.Optional(CONF_EXCLUDE_DEVICE_CLASS): _VALUES,
+            vol.Optional(CONF_EXCLUDE_ENTITY_CATEGORY): _VALUES,
             vol.Optional(CONF_ATTRIBUTE): cv.string,
             vol.Optional(CONF_FROM): _VALUES,
             vol.Optional(CONF_NOT_FROM): _VALUES,
@@ -165,7 +169,13 @@ _OPTIONS_SCHEMA = vol.All(
 # before it can validate anything.
 _TARGET_SCHEMA = vol.Schema(cv.TARGET_FIELDS)
 
-_SELECTORS = (CONF_DOMAIN, CONF_INTEGRATION, CONF_CONFIG_ENTRY, CONF_DEVICE_CLASS)
+_SELECTORS = (
+    CONF_DOMAIN,
+    CONF_INTEGRATION,
+    CONF_CONFIG_ENTRY,
+    CONF_DEVICE_CLASS,
+    CONF_ENTITY_CATEGORY,
+)
 
 
 def _target_or_nothing(value: Any) -> ConfigType | None:
@@ -220,15 +230,29 @@ class _EntityFilter:
     integrations: frozenset[str] = frozenset()
     config_entries: frozenset[str] = frozenset()
     device_classes: frozenset[str] = frozenset()
+    entity_categories: frozenset[str | None] = frozenset()
 
     @classmethod
     def from_options(cls, options: dict[str, Any], prefix: str = "") -> _EntityFilter:
         """Build the filter from the options, with or without `exclude_`."""
+        category_key = f"{prefix}{CONF_ENTITY_CATEGORY}"
+        if category_key in options:
+            raw_categories = options[category_key]
+            categories = frozenset(
+                None
+                if cat is None or str(cat).lower() in ("none", "null", "")
+                else str(cat).lower()
+                for cat in raw_categories
+            )
+        else:
+            categories = frozenset()
+
         return cls(
             domains=frozenset(options.get(f"{prefix}{CONF_DOMAIN}", [])),
             integrations=frozenset(options.get(f"{prefix}{CONF_INTEGRATION}", [])),
             config_entries=frozenset(options.get(f"{prefix}{CONF_CONFIG_ENTRY}", [])),
             device_classes=frozenset(options.get(f"{prefix}{CONF_DEVICE_CLASS}", [])),
+            entity_categories=categories,
         )
 
     @property
@@ -239,6 +263,7 @@ class _EntityFilter:
             or self.integrations
             or self.config_entries
             or self.device_classes
+            or self.entity_categories
         )
 
     @callback
@@ -257,7 +282,7 @@ class _EntityFilter:
     def _passes(self, entity_id: str, entry: er.RegistryEntry | None) -> bool:
         """Return whether one entity passes every list that was given.
 
-        Integration, entry and device class come from the entity registry,
+        Integration, entry, device class and entity category come from the entity registry,
         because a change there is what makes the target look again. An entity
         without a registry entry has none of them, so it never passes those.
         Reading the device class from its state instead would be a filter that
@@ -276,11 +301,24 @@ class _EntityFilter:
         ):
             return False
 
-        return not self.device_classes or (
-            entry is not None
-            and (entry.device_class or entry.original_device_class)
-            in self.device_classes
-        )
+        if self.device_classes and (
+            entry is None
+            or (entry.device_class or entry.original_device_class)
+            not in self.device_classes
+        ):
+            return False
+
+        if self.entity_categories:
+            category = entry.entity_category if entry is not None else None
+            cat_str = (
+                category.value
+                if hasattr(category, "value")
+                else (str(category).lower() if category is not None else None)
+            )
+            if cat_str not in self.entity_categories:
+                return False
+
+        return True
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -483,12 +521,23 @@ class _StateWatcher(StateChangeWatcher):
     def _everything(self) -> set[str]:
         """Return everything the include lists can pick from.
 
-        All entities in the registry, and the entities without a registry
-        entry, which only a domain can pick. Those are found when the registry
-        changes, not the moment their first state is written.
+        If entity_category or exclude_entity_category is specified in options,
+        returns all entities in the registry. Otherwise, returns primary
+        entities (where entry.entity_category is None) and unregistered entities.
         """
         registry = er.async_get(self._hass)
-        registered = set(registry.entities.keys())
+        has_category_option = (
+            bool(self._settings.include.entity_categories)
+            or bool(self._settings.exclude.entity_categories)
+        )
+        if has_category_option:
+            registered = set(registry.entities.keys())
+        else:
+            registered = {
+                entity_id
+                for entity_id, entry in registry.entities.items()
+                if entry.entity_category is None
+            }
         unregistered = {
             entity_id
             for entity_id in self._hass.states.async_entity_ids()

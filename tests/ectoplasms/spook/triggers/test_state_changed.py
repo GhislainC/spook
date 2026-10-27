@@ -1021,10 +1021,10 @@ async def test_without_a_target_every_list_picks(
     assert _fired_for(handed) == [mixed[name] for name in expected]
 
 
-async def test_picking_includes_entities_with_category(
+async def test_picking_by_entity_category(
     hass: HomeAssistant, entity_registry: er.EntityRegistry
 ) -> None:
-    """Entities with an entity_category (like DIAGNOSTIC or CONFIG) are included."""
+    """Entities can be filtered by entity_category."""
     primary = entity_registry.async_get_or_create(
         "binary_sensor", "demo", "door", original_device_class="door"
     )
@@ -1035,21 +1035,41 @@ async def test_picking_includes_entities_with_category(
         original_device_class="door",
         entity_category=EntityCategory.DIAGNOSTIC,
     )
-    for entry in (primary, diagnostic):
+    config = entity_registry.async_get_or_create(
+        "binary_sensor",
+        "demo",
+        "setting",
+        original_device_class="door",
+        entity_category=EntityCategory.CONFIG,
+    )
+    for entry in (primary, diagnostic, config):
         await _set(hass, entry.entity_id, "off")
-    handed, unsub = await _attach(hass, NO_TARGET, device_class=["door"])
 
-    await _set(hass, diagnostic.entity_id, "on")
-    await _set(hass, primary.entity_id, "on")
-    unsub()
+    # Filter for diagnostic only
+    handed_diag, unsub_diag = await _attach(
+        hass, NO_TARGET, device_class=["door"], entity_category=["diagnostic"]
+    )
+    for entry in (primary, diagnostic, config):
+        await _set(hass, entry.entity_id, "on")
+    unsub_diag()
+    assert _fired_for(handed_diag) == [diagnostic.entity_id]
 
-    assert _fired_for(handed) == [diagnostic.entity_id, primary.entity_id]
+    # Filter for config and none
+    for entry in (primary, diagnostic, config):
+        await _set(hass, entry.entity_id, "off")
+    handed_cfg_none, unsub_cfg_none = await _attach(
+        hass, NO_TARGET, device_class=["door"], entity_category=["config", "none"]
+    )
+    for entry in (primary, diagnostic, config):
+        await _set(hass, entry.entity_id, "on")
+    unsub_cfg_none()
+    assert _fired_for(handed_cfg_none) == [primary.entity_id, config.entity_id]
 
 
 async def test_picking_by_update_domain(
     hass: HomeAssistant, entity_registry: er.EntityRegistry
 ) -> None:
-    """Entities in the update domain (which have EntityCategory.CONFIG) trigger properly."""
+    """Entities in the update domain (which have EntityCategory.CONFIG) trigger when config category is selected."""
     update_entity = entity_registry.async_get_or_create(
         "update",
         "demo",
@@ -1057,8 +1077,18 @@ async def test_picking_by_update_domain(
         entity_category=EntityCategory.CONFIG,
     )
     await _set(hass, update_entity.entity_id, "off")
-    handed, unsub = await _attach(hass, NO_TARGET, domain=["update"])
 
+    # By default (without entity_category option), update_entity with CONFIG category is not picked
+    handed_default, unsub_default = await _attach(hass, NO_TARGET, domain=["update"])
+    await _set(hass, update_entity.entity_id, "on")
+    unsub_default()
+    assert handed_default == []
+
+    # When specifying entity_category: ["config"], it is picked
+    await _set(hass, update_entity.entity_id, "off")
+    handed, unsub = await _attach(
+        hass, NO_TARGET, domain=["update"], entity_category=["config"]
+    )
     await _set(hass, update_entity.entity_id, "on")
     unsub()
 
